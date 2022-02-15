@@ -1,0 +1,573 @@
+---
+title: "Text Analysis Demo"
+author: "Akitaka Matsuo"
+institute: "Institute for Data Science and Analytics, University of Essex"
+date: "15-02-2022"
+output: 
+  ioslides_presentation:
+    smaller: true
+    widescreen: true
+    transition: faster
+---
+
+
+
+```{r setup, include=FALSE}
+options(htmltools.dir.version = FALSE)
+library(knitr)
+```
+
+
+## Today's schedule
+
+1. Install required software
+1. Read data into R
+2. Convert R data to quanteda format
+3. Text Analysis with quanteda: Descriptive statistics
+4. Text Analysis with quanteda: Estimating models
+5. Estimating Glove
+
+
+
+
+## Required software
+
+-	R, RStudio
+- r-packages
+  - tidyverse
+  - quanteda (https://quanteda.io/articles/pkgdown/quickstart_ja.html)
+    - quanteda.textmodels
+    - quanteda.textstats
+    - quanteda.textplots
+  - caret (machine learning utility)
+  - e1071 (confusionMatrix function)
+  - text2vec (word embedding)
+  - stringi (general text processing)
+
+## Download data and slides
+
+- All the files used in this workshop are compiled in this github repository
+    https://github.com/amatsuo/HEROES-2022-TextAnalysis
+- In RStudio, click on the project icon
+    - New Project]->[Version Control]->[Git]
+    - Enter the URL above
+
+
+## Packages
+
+1. tidyverse
+    - https://www.tidyverse.org/
+    - "The tidyverse is an opinionated collection of R packages designed for data science."
+    - To install
+    ```{r eval=FALSE}
+    install.packages("tidyverse")
+    ```
+2. quanteda
+    - R package for integrated text analysis
+    - To install
+    ```{r eval=FALSE}
+    install.packages("quanteda", "quanteda.textplots", "quanteda.textmodels", 
+                     "quanteda.textstats")
+    ```` 
+
+3. other
+    ```{r eval=FALSE}
+    install.packages(c("caret", "e1071", "DT", "text2vec", "stringi"))
+    ````
+
+
+## Load text data into R
+
+**Load the packages**
+
+```{r message=FALSE}
+library(tidyverse)
+library(quanteda)
+library(quanteda.textmodels)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(stringi)
+library(caret)
+library(DT)
+```
+
+
+## Load text data into R
+
+- All the data is in the `data` folder
+- This is the IMF and AMRO country reports extracted from pdf
+
+**Let's list the files first**
+
+````{r}
+list.files("data", pattern = "csv")
+````
+
+- 11 files, file name with the convention `{InternationalOrganization}-{Country}-{year}.csv`
+
+
+## Load text data into R
+
+### Check the contents of the file
+
+```{r message=FALSE}
+data_temp <- read_csv("data/AMRO-Korea-2018.csv") # Open the data
+print(data_temp) # Print it to the screen
+```
+
+The pre-processed pdfs of the report are in their respective files. From here, we can remove the unnecessary rows and columns and extract the necessary variables
+
+## Load text data into R
+
+### Data Processing
+
+- Variables to use are `page_number, paragraph_number, text`.
+- To delete a line, use the value of the variable `pages_to_skip, detection`.
+
+**Processing dataframes with `dplyr`**.
+````{r}
+# Comments after "#".
+
+data_temp <- data_temp %>% # "%>%" is dplyr's pipe
+  filter(pages_to_skip != TRUE) %>% # filter rows. Remove pages to skip.
+  filter(detection == "normal") %>% # select lines with normal text
+  select(page_number, paragraph_number, text)
+print(data_temp)
+
+````
+
+
+
+## Load text data into R
+### Batch processing of many files
+
+Putting all these processes together into a single data frame
+Here are three ways to do it
+
+##### Method 1: Use a for loop (don't)
+
+````{r message=FALSE}
+data_all <- NULL # create empty data
+file_names <- list.files("data", pattern = "csv", full.names = TRUE)
+
+for (fn in file_names) {
+  data_current <- read_csv(fn) # open a file
+  data_current <- data_current %>% 
+    filter(pages_to_skip != TRUE) %>% 
+    filter(detection == "normal") %>% 
+    select(page_number, paragraph_number, text) %>%
+    mutate(file_name = fn)
+  data_all <- bind_rows(data_all, data_current) 
+}
+
+````
+
+## Load text data into R
+##### Method 2: map() + bind_rows() (or map_dfr())
+
+```{r message=FALSE}
+file_names <- list.files("data", pattern = "csv", full.names = TRUE)
+
+data_all_2 <- file_names %>%
+  map(~read_csv(.x) %>% 
+    filter(pages_to_skip != TRUE) %>%
+    filter(detection == "normal") %>%
+    select(page_number, paragraph_number, text) %>%
+    mutate(file_name = .x)) %>% bind_rows()
+```
+
+## Load text data into R
+### Method 3: use `readtext`
+
+
+```{r}
+library(readtext)
+data_all_3 <- 
+  readtext("data", text_field = "text") %>% 
+  filter(pages_to_skip != TRUE) %>% 
+  filter(detection == "normal") %>% 
+  select(doc_id, page_number, paragraph_number, text) %>%
+  rename(file_name = doc_id)
+```
+
+
+## Load text data into R
+#### Extracting variables from file names
+
+Since the data we have created so far does not contain country names, etc., we will extract them from the variables in the file name.
+
+```{r}
+data_all <- 
+  data_all %>%
+  # Create tmp temporary variable
+  mutate(tmp = file_name %>%
+           stri_replace_first_fixed("data/", "") %>%
+           stri_replace_first_fixed(".csv", "")) %>% # remove extraneous parts
+  separate(tmp, sep = "-", into = c("institution", "country", "year")) 
+　# Use dplyr's separate() to split the tmp column into three variables
+```
+
+
+
+## Convert R data to quanteda format
+
+With quanteda, you can easily convert R data frames into a form that can be used for data analysis.
+
+**Steps**.
+
+1. Create a corpus
+2. Tokenize the text
+3. Create a document feature matrix (DFM)
+
+## Creating a corpus
+
+A **corpus** is an object of **quanteda** that stores texts and a set of meta-variables of the text together, and can be easily created from an R dataframe. The texts are usually not modified before the corpus is created, but the corpus of paragraphs can be divided into sentences at this stage.
+
+```{r}
+data_corpus <- corpus(data_all, text_field = "text")
+print(data_corpus)
+```
+
+Use `as.character()` to check the contents
+```{r}
+as.character(data_corpus) %>% head(2) %>% print()
+```
+
+
+### Extracting document variables
+
+A corpus created from a dataframe with `corpus()` retains all variables, and they are inherited even if you tokenize or create a dfm. Use the `docvars()` command to extract them.
+
+```{r}
+docvars(data_corpus) %>% head()
+```
+
+## Corpus Transformation
+
+`quanteda` provides a method for remaking a corpus in the form of `corpus_*()`.
+
+#### Changing text units
+
+From paragraphs to sentence units.
+
+```{r}
+data_corpus_sentence <- corpus_reshape(data_corpus, to = 'sentences')
+print(data_corpus_sentence)
+```
+
+#### Selecting part of a corpus
+
+The second argument of `corpus_subset()` specifies the condition for selecting a corpus. You can use document variables directly.
+
+```{r}
+data_corpus_korea <- corpus_subset(data_corpus, country == 'Korea')
+print(data_corpus_korea)
+```
+
+
+## Tokenization
+
+**quanetda** uses the `tokens()` command to tokenize text. There are various units of tokens, but usually words are used as a unit.
+
+```{r}
+data_tokens <- tokens(data_corpus)
+data_tokens[1]
+```
+
+## Removing unnecessary tokens, reshaping tokens
+
+In the process of creating a `tokens()` object, or after it has been created, you can format the tokens as needed.
+
+All options are basically turned off by default, but you can turn them on to perform various operations.
+
+```{r}
+tokens_temp <- tokens(data_corpus,
+                      remove_numbers = FALSE, 
+                      remove_punct = FALSE,
+                      remove_symbols = FALSE, 
+                      remove_separators = TRUE,
+                      remove_twitter = FALSE, 
+                      remove_hyphens = FALSE, 
+                      remove_url = FALSE)
+```
+
+
+Or you can use `tokens_select()` for more fine-grained operations.
+
+```{r}
+long_tokens <- tokens_select(data_tokens, min_nchar = 3)
+number_tokens <- tokens_select(data_tokens, "^\\d", valuetype = "regex")
+```
+
+## KeyWord-In-Context (kwic)
+
+By applying kwic to **tokens** objects, you can extract the contexts in which words of interest to you are used. For example, "inflation targeting".
+
+```{r}
+kwic(data_tokens, phrase("inflation targe*")) 
+```
+
+## Create a tokens object for the purpose of this analysis
+
+
+```{r}
+data_tokens_final <- tokens(data_corpus,
+                      remove_numbers = TRUE, 
+                      remove_punct = FALSE,
+                      remove_symbols = FALSE, 
+                      remove_separators = TRUE,
+                      split_hyphens = FALSE, 
+                      remove_url = TRUE) %>%
+  tokens_remove(pattern = stopwords(), padding = TRUE) %>% # remove stopwords
+  tokens_remove(pattern = c("AMRO", "IMF"), padding = TRUE) %>% # remove institution name
+  tokens_remove(pattern = c("Indonesia*", "Japan*", "Korea*", "Thai*", "Vietnum*"),
+                padding = TRUE) %>% # remove country names
+  tokens_keep(pattern = "^[a-zA-Z]+$", valuetype = "regex", padding = TRUE) # Keep words made of only alphabetic characters
+
+data_tokens_final[1]
+```
+
+## Find the collocation
+
+Try calculating the collocation
+
+```{r}
+colloc <- textstat_collocations(data_tokens_final, min_count = 5, tolower = FALSE)
+colloc %>% 
+  filter(collocation %>% stri_trans_tolower %>% stri_detect_fixed("inflation"))
+```
+
+## "stability"
+
+```{r}
+colloc %>% 
+  filter(collocation %>% stri_trans_tolower %>% stri_detect_fixed("stability"))
+```
+
+## Use of collocation
+
+There are many possible ways to use this, but one way is to concatenate a collocation and use this in subsequent analysis.
+
+```{r}
+colloc <- colloc %>% filter(z > 3)
+data_tokens_compounded <- tokens_compound(data_tokens_final,
+                                          pattern = phrase(colloc$collocation)) %>%
+  tokens_remove("*consultation_report*")
+```
+
+## Create a dfm
+
+Using the tokens object created so far, create a document feature matrix (dfm) for later analysis. A dfm is a matrix where each document is a row and each feature (e.g. word) is a column.
+
+
+```{r}
+data_dfm <- dfm(data_tokens_compounded, tolower = TRUE) %>% 
+  dfm_select(min_nchar = 3) # Remove words with less than 3 characters.
+data_dfm
+```
+
+Furthermore, erase words that only appear in one document or that have not been used more than 10 times.
+
+```{r}
+data_dfm <- dfm_trim(data_dfm, min_docfreq = 2, min_termfreq = 10) 
+data_dfm
+```
+
+# Text analysis with quanteda: Descriptive statistics
+
+## Competing expectations
+
+**1. (globalist complementarity): AMRO is as neoclassical as IMF**
+
+**2. (developmental state hypothesis): AMRO is more developmentalist than IMF**
+
+
+## Commonly used words
+
+First, let's simply check what words are used.
+
+```{r}
+topfeatures(data_dfm, n = 30)
+```
+
+## Check keyness
+
+Use `textstat_keyness()` to compare the difference between feature words used in AMRO and IMF.
+
+### Keywords for AMRO
+
+```{r}
+textstat_keyness(data_dfm, target = docvars(data_dfm, "institution") == "AMRO") %>% head(20)
+```
+
+## Check keyness
+
+### Keywords for  IMF
+
+```{r}
+textstat_keyness(data_dfm, target = docvars(data_dfm, "institution") == "IMF") %>% head(20)
+```
+
+## Check keyness: keywords derived from expectations
+
+The following list of words were provided as words that might be related to each hypothesis. Let's feed the words that we are interested in on the next page.
+
+**Globalist Hypothesis:** equilibrium, inflation targeting, currency volatility, fiscal stability, credibility, output gap, balanced growth, safety net, market economy, macro-prudential, capital adequacy, competition, debt sustainability
+
+**Regional-developmentalist Hypothesis:** autonomy, capital accumulation, currency appreciation, fiscal stimulus, strategy, output growth, dynamic growth, competitiveness, state control, saving, investment, concentration, current account surplus
+
+
+## Check keyness
+
+```{r}
+textstat_keyness(data_dfm, target = docvars(data_dfm, "institution") == "AMRO") %>%
+  mutate_at(.vars = 2:3, round, digits = 3) %>%
+  datatable()
+```
+
+
+
+# Text analysis with quanteda: analysis with models
+
+## Overview
+
+In the following, we explain how to use the `textmodel_*`  functions provided by **quanteda.textmodel**.
+
+It estimates and interprets the following two models: 
+
+1. naive bayes model
+2. wordfish model
+
+## Classify using the Naive Bayes Model
+
+- Supervised learning model
+- Linear model so we can check the score of each word
+
+**This example**.
+
+- "AMRO", "IMF" labels are outputs.
+- The unit of analysis is each paragraph of the report
+- What to check
+    - Is it possible to classify the words based on their use in the first place?
+    - If so, what words are influencing it?
+- To avoid overlearning problems, separate the data into train and test.
+
+## Use Naive Bayes Model for classification
+
+```{r}
+# shuffle dfm
+set.seed(20190924)
+data_dfm <- dfm_sample(data_dfm)
+
+# train-test split
+train <- sample(nrow(data_dfm), size = nrow(data_dfm) * 0.7)
+train <- seq(nrow(data_dfm)) %in% train
+
+# split dfm
+data_dfm_train <- dfm_subset(data_dfm, subset = train)
+data_dfm_test <- dfm_subset(data_dfm, subset = !train)
+
+# estimate the model
+model_nb <- textmodel_nb(data_dfm_train, docvars(data_dfm_train, "institution") == "AMRO")
+```
+
+## Naive Bayes
+```{r}
+train_pred <- predict(model_nb)
+train_truth <- docvars(data_dfm_train, "institution") == "AMRO"
+table(train_pred, train_truth)
+```
+
+```{r}
+test_pred <- predict(model_nb, newdata = data_dfm_test)
+test_truth <- docvars(data_dfm_test, "institution") == "AMRO"
+table(test_pred, test_truth)
+
+```
+
+## Naive Bayes, Train Confusion Matrix
+```{r}
+confusionMatrix(train_pred, factor(train_truth))
+```
+
+## Naive Bayes, Test Confusion Matrix
+
+```{r}
+confusionMatrix(test_pred, factor(test_truth))
+```
+
+## Naive Bayes, checking for words
+
+## Prepare word data
+
+```{r}
+coef_prob <- coefficients(model_nb)[, 2] %>% data.frame() %>% 
+  rename(prob1 = ".") %>% rownames_to_column() %>%
+  mutate(count =  data_dfm_train %>% colSums())
+```
+
+## Naive Bayes, word table
+
+```{r}
+coef_prob %>% 
+  filter(nchar(rowname) >=2) %>%
+  filter(count > quantile(count, .7)) %>% # keep top thirty words
+  arrange(-prob1) %>% mutate(prob1 = round(prob1, 3)) %>% 
+  datatable() 
+```
+
+## Scaling with Wordfish
+
+As an example of unsupervised learning, we estimate the wordfish model.
+
+**This example**.
+
+- Unit of analysis is the report level
+- Estimate the position of the report
+- Since this is unsupervised learning, you need to interpret the meaning of the axes by yourself.
+
+
+
+## Scaling with Wordfish
+
+```{r}
+# Create a new document variable "report".
+docvars(data_dfm, "report") <- paste(docvars(data_dfm, "institution"),
+                                     docvars(data_dfm, "country"),
+                                     docvars(data_dfm, "year")) 
+# Use report to aggregate dfm to report level
+data_dfm_report <- dfm_group(data_dfm, groups = report)
+# Estimate the model
+model_wf <- textmodel_wordfish(data_dfm_report)
+````
+
+## Wordfish: plotting positions
+
+```{r}
+textplot_scale1d(model_wf)
+```
+
+
+## Wordfish: plot words
+
+```{r}
+textplot_scale1d(model_wf, margin = 'features')
+```
+
+## Wordfish: word table
+
+```{r}
+coefs <- coefficients(model_wf)$features %>%
+  as.data.frame() %>% rownames_to_column(var = "feature") %>%
+  mutate_at(2:3, round, digits = 3) %>% arrange(-beta)
+datatable(coefs)
+```
+
+## Other things you can do with quanteda
+
+- Estimating topic models
+  - Use `convert()` function and fit a model
+    - `topicmodels` and `stm`
+- Estimating word vectors
+  - `word2vec` (R package)
+  - Or call python based packages through `reticulate`
